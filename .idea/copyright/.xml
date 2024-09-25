@@ -1,0 +1,6 @@
+<component name="CopyrightManager">
+  <copyright>
+    <option name="notice" value="Copyright (c) &amp;#36;originalComment.match(&quot;Copyright \(c\) (\d+)&quot;, 1, &quot;-&quot;, &quot;&amp;#36;today.year&quot;)&amp;#36;today.year by Tomoya Konishi&#10;All rights reserved.&#10;&#10;License:&#10;This program is permitted under the principle of &quot;NO WARRANTY&quot; and&#10;&quot;NO RESPONSIBILITY&quot;. The author shall not be liable for any event&#10;arising in any way out of the use of these resources.&#10;&#10;Redistribution in source and binary forms, with or without&#10;modification, is also permitted provided that the above copyright&#10;notice, disclaimer and this condition are retained.&#10;  &#10;  &#10;" />
+    <option name="myName" value="マイコピーライト" />
+  </copyright>
+</component>
