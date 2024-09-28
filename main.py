@@ -23,6 +23,8 @@ from imutils.perspective import four_point_transform
 import re
 import base64
 
+import my_img
+
 # 参考
 # https://qiita.com/not13/items/dcd8c12d64982dc0e819
 
@@ -34,10 +36,19 @@ def main():
     ## ● マークシート
     """)
     file_path = st.sidebar.file_uploader("PDFファイル", type="pdf")
+
     if not file_path:
         st.sidebar.write("マークシートを読み込んでください")
         return
     else:
+        try:
+            if st.session_state.file_path != file_path:
+                st.cache_data.clear()
+        except AttributeError:
+            pass
+
+        st.session_state.file_path = file_path
+
         pdf_document = fitz.open(stream=file_path.read(), filetype="pdf")
         if pdf_document.page_count > 1:
             page = st.sidebar.slider('ページ選択 [←] [→]', 1, pdf_document.page_count, 1)
@@ -54,6 +65,11 @@ def main():
     else:
         threshold = st.sidebar.slider('', 0, 255, 170)
 
+    if st.sidebar.checkbox('小さいマークを自動で除外', value=True):
+        acceptable_small_size = 0.4
+    else:
+        acceptable_small_size = st.sidebar.slider('', 0.0, 1.0, 0.4, step=0.05)
+
     is_double_mark = st.sidebar.checkbox('ダブルマークを許可', value=True)
     str_dimensions = st.sidebar.text_input('各フレームのマーク数(行x列)', value='(4x10), (30x10), (30x10)')
     # タプルのリストに変換
@@ -64,183 +80,117 @@ def main():
     download_button = st.sidebar.button("全てのシートを処理")
 
     if download_button:
-        data_list = do_all_omr(pdf_document, threshold, is_double_mark, dim_list)
+        data_list, image_list = do_all_omr(pdf_document, threshold, acceptable_small_size, is_double_mark, dim_list)
+
+        # CSVファイルの作成
         csv = pd.DataFrame(data_list).to_csv(index=False)
         csv_b64 = base64.b64encode(csv.encode()).decode()
+
+        # PDFファイルの作成
+        pdf_doc = fitz.open()
+        for image in image_list:
+            img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            _, jpg_buf = cv2.imencode(".jpg", img, (cv2.IMWRITE_JPEG_QUALITY, 50))
+            page = pdf_doc.new_page()
+            page.insert_image(page.rect, stream=jpg_buf.tobytes())
+        pdf_b64 = base64.b64encode(pdf_doc.tobytes()).decode()
 
         st.success("全てのシートの読み取りが完了しました")
         st.balloons()
         st.markdown(f'<a href="data:file/csv;base64,{csv_b64}" download="result.csv">Download csv file</a>',
                     unsafe_allow_html=True)
+        st.markdown(f'<a href="data:file/pdf;base64,{pdf_b64}" download="result.pdf">Download pdf file</a>',
+                    unsafe_allow_html=True)
         st.button('戻る')
     else:
         # プレビュー
-        do_omr(pdf_document, page, img_width, threshold, is_double_mark, dim_list)
+        table, img = do_omr(pdf_document, page, threshold, acceptable_small_size, is_double_mark, dim_list)
 
-
-def do_all_omr(pdf_document, threshold, is_double_mark, dim_list):
-    data_list = []
-    for page in range(1, pdf_document.page_count+1):
-        data = do_omr(pdf_document, page, 0, threshold, is_double_mark, dim_list, is_show_result=False)
-        data_list.append(data)
-
-    return data_list
-
-
-def do_omr(pdf_document, page, img_width, threshold, is_double_mark, dim_list, is_show_result=True):
-    # 処理開始
-    data_list = []
-    img = get_image_from_pdf(pdf_document, page)
-    img = correct_tilt(img)
-    frame_list = find_frames(img)
-
-    if len(frame_list) == 0:
-        st.warning("エラー！ 解答欄のフレームが検出できませんでした。")
-
-    for i, frame in enumerate(frame_list):
-        mark_list, frame_img = find_marks(img, frame, threshold)
-        frame_width = np.max(frame[:,0]) - np.min(frame[:,0])
-        frame_height = np.max(frame[:,1]) - np.min(frame[:,1])
-        try:
-            _ = dim_list[i]
-        except IndexError:
-            st.warning("フレームの数とマーク数の設定が合っていません（フレーム数: {}, マーク数の設定: {}）"
-                       .format(len(frame_list), len(dim_list)))
-            st.stop()
-
-        data = decode_marks((frame_height, frame_width), mark_list, dim_list[i], is_double_mark)
-        data_list.append(data)
-
-        if is_show_result:
-            # 検出したマークの描画
-            frame_origin = (np.min(frame[:,0]), np.min(frame[:,1]))
-            for mark in mark_list:
-                for pt in mark:
-                    pt[0] += frame_origin
-
-                cv2.drawContours(img, [mark], -1, (255, 0, 0), 2)
-
-    if is_show_result:
-        # フレームの描画
-        for i,c in enumerate(frame_list):
-            cv2.drawContours(img, [c], -1, (0, 255, 0), 2)
-            cv2.putText(img, str(i), (np.min(c[:,0]), np.min(c[:,1])-20), cv2.FONT_HERSHEY_SIMPLEX,
-                        1, (0, 255, 0), 2)
-            # cv2.circle(img, (np.min(c[0,0]), np.min(c[0,1])), 5, (255, 0, 0), -1)
-            # cv2.circle(img, (np.min(c[1,0]), np.min(c[1,1])), 5, (0, 255, 0), -1)
-            # cv2.circle(img, (np.min(c[2,0]), np.min(c[2,1])), 5, (0, 0, 255), -1)
-
-    if is_show_result:
         # 加工済み画像の表示
         st.write("検出結果プレビュー")
         st.image(img, width=img_width)
 
         # 結果の表示
         st.write("マーク読み取り結果")
-        df = pd.DataFrame(data_list)
-        st.dataframe(df)
+        df = pd.DataFrame(table,
+                          index=(range(1, len(dim_list)+1)),
+                          columns=(range(1, max(dim_list)[0]+1)))
+        st.table(df)
 
-    # 1次元リストに変換
-    data_list = [item for sublist in data_list for item in sublist]
-    return data_list
-
-
-def is_binary_image(image):
-    # Get the unique pixel values in the image
-    unique_values = np.unique(image)
-
-    # Check if there are exactly two unique values: 0 and 255
-    return len(unique_values) == 2 and set(unique_values).issubset({0, 255})
-
-def decode_marks(frame_dim, mark_list, mark_array_dim, is_double_mark):
-    MARK = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
-    mark_index = {char: index for index, char in enumerate(MARK)}
-
-    frame_height, frame_width = frame_dim
-    mark_rows, mark_cols = mark_array_dim
-
-    data_list = ["" for i in range(mark_rows)]
-
-    mark_centroid_list = [np.mean(mark, axis=0)[0] for mark in mark_list]
-    mark_centroid_list = sorted(mark_centroid_list, key=lambda x: x[1])
-    for mark in mark_centroid_list:
-        x, y = mark
-        # マークがどのセルに属するか
-        row = int((y/frame_height)*mark_rows)
-        col = int((x/frame_width)*mark_cols)
-        if is_double_mark:
-            # ダブルマークを許可
-            data_list[row] += MARK[col]
-        else:
-            # ダブルマークを許可しない
-            if data_list[row] == "":
-                data_list[row] = MARK[col]
-            else:
-                data_list[row] = "X"
-
-    # マークの並び替え
-    data_list = [''.join(sorted(data, key=lambda x: mark_index[x]))
-                 for data in data_list
-                     if "X" not in data]
-    return data_list
 
 @st.cache_data
-def find_marks(img, frame, threshold):
-    frame_img = imutils.perspective.four_point_transform(img, frame)
-    warped = threshold_image(frame_img, threshold)
-    warped = remove_lines(warped)
+def do_all_omr(_pdf_document, threshold, acceptable_small_size, is_double_mark, dim_list):
+    data_list = []
+    image_list = []
+    for page in range(1, _pdf_document.page_count+1):
+        table_list, image = do_omr(_pdf_document, page, threshold, acceptable_small_size, is_double_mark, dim_list)
+        # 1次元リストに変換
+        table_list = [item for sublist in table_list for item in sublist]
+        data_list.append(table_list)
+        image_list.append(image)
 
-    # 収縮・膨張によりノイズを除去
-    kernel = np.ones((5, 5), np.uint8)
-    warped = cv2.erode(warped, kernel, iterations=2)
-    warped = cv2.dilate(warped, kernel, iterations=2)
-
-    # マークの検出
-    cnts = cv2.findContours(warped.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = imutils.grab_contours(cnts)
-    if len(cnts) == 0:
-        return [], frame_img
-
-    # マークの選別
-    mark_cnts = []
-    max_area = np.max([cv2.contourArea(c) for c in cnts])
-    for c in cnts:
-        (x, y, w, h) = cv2.boundingRect(c)
-        ar = w / float(h)
-        # 形の悪いもの、小さいものは無視
-        if ar < 0.6 or ar > 1.4 or cv2.contourArea(c) < 0.4*max_area:
-            continue
-        # マークが半分以上埋まっていないものは無視
-        elif count_pixels_in_rect(warped,(x, y, w, h)) < 0.5*w*h:
-            continue
-        else:
-            mark_cnts.append(c)
-
-    mark_cnts = sorted(mark_cnts, key=lambda x: (np.mean(x[:]), np.mean(x[:0])))
-    return mark_cnts, frame_img
+    return data_list, image_list
 
 
-def count_pixels_in_rect(img, rect):
-    mask = np.zeros(img.shape, dtype="uint8")
-    cv2.rectangle(mask, (rect[0], rect[1]), (rect[0]+rect[2], rect[1]+rect[3]), 255, -1)
-    mask = cv2.bitwise_and(img, img, mask=mask)
-    return cv2.countNonZero(mask)
-
-
-def correct_tilt(img):
-    ### 画像の傾き補正
-    # https://note.com/bibinbeef/n/ne399c766d9d5
+@st.cache_data
+def do_omr(_pdf_document, page, threshold, acceptable_small_size, is_double_mark, dim_list):
+    # 処理開始
+    table_list = []
+    img = get_image_from_pdf(_pdf_document, page)
+    img = correct_tilt(img)
     frame_list = find_frames(img)
-    if len(frame_list) > 0:
-        max_frame = sorted(frame_list, key=cv2.contourArea, reverse=True)[0]
-        vec = max_frame[1] - max_frame[0]
-        rot_theta = np.arctan2(vec[0], vec[1]) *180/3.14
-        img = imutils.rotate(img, -rot_theta)
-    return img
+
+    if len(frame_list) == 0:
+        st.warning("エラー！ 解答枠が検出できませんでした。")
+        st.stop()
+
+    for i, frame in enumerate(frame_list):
+        mark_list, frame_img = find_marks(img, frame, threshold, acceptable_small_size)
+
+        try:
+            _ = dim_list[i]
+        except IndexError:
+            st.warning("解答枠の個数({})に対してマーク数設定(nxm)の数({})が不足しています"
+                       .format(len(frame_list), len(dim_list)))
+            st.stop()
+
+        frame_width = np.max(frame[:,0]) - np.min(frame[:,0])
+        frame_height = np.max(frame[:,1]) - np.min(frame[:,1])
+        data = decode_marks((frame_height, frame_width), mark_list, dim_list[i], is_double_mark)
+        table_list.append(data)
+
+        # 検出したマークの描画
+        frame_origin = (np.min(frame[:,0]), np.min(frame[:,1]))
+        for mark in mark_list:
+            for pt in mark:
+                pt[0] += frame_origin
+
+            cv2.drawContours(img, [mark], -1, (255, 0, 0), 2)
+
+    # 解答枠の描画
+    for i,c in enumerate(frame_list):
+        cv2.drawContours(img, [c], 0, (0, 255, 0), 2)
+        cv2.putText(img, str(i), (np.min(c[:,0]), np.min(c[:,1])-20), cv2.FONT_HERSHEY_SIMPLEX,
+                    1, (0, 255, 0), 2)
+        # cv2.circle(img, (np.min(c[0,0]), np.min(c[0,1])), 5, (255, 0, 0), -1)
+        # cv2.circle(img, (np.min(c[1,0]), np.min(c[1,1])), 5, (0, 255, 0), -1)
+        # cv2.circle(img, (np.min(c[2,0]), np.min(c[2,1])), 5, (0, 0, 255), -1)
+
+    return table_list, img
 
 
 def get_image_from_pdf(pdf_document, page):
-    ### 画像の読み込み
+    """
+    PDFドキュメントの指定されたページから画像を読み込みます。
+
+    Args:
+        pdf_document (fitz.Document): PDFドキュメントオブジェクト。
+        page (int): 読み込むページ番号（1から始まる）。
+
+    Returns:
+        numpy.ndarray: 読み込まれた画像。
+    """
+
     # https://note.com/jolly_ixia1223/n/n499b3480fedc
     # https://qiita.com/inoshun/items/ded26487bf0065794d2c
 
@@ -263,13 +213,48 @@ def get_image_from_pdf(pdf_document, page):
     margin_w, margin_h = img.shape[1]*0.05, img.shape[0]*0.03
     img = img[int(margin_h):int(-margin_h), int(margin_w):int(-margin_w)]
 
-    if is_binary_image(img):
-        st.warning("注意！ 2値化された画像です。グレースケールで読み込んでください。")
+    if my_img.is_binary_image(img):
+        st.warning("注意！ 2値化された画像です。なるべくカラーで読み込んでください。")
+
+    elif my_img.is_gray_image(img):
+        st.warning("注意! グレースケール画像です。なるべくカラーで読み込んでください。")
+
+    # elif my_img.is_color_image(img):
+    #    st.write("カラー画像です。")
 
     width = 2000
     img = cv2.resize(img, (int(img.shape[1]*width/img.shape[0]), width))
 
     return img
+
+
+def correct_tilt(img):
+    ### 画像の傾き補正
+    # https://note.com/bibinbeef/n/ne399c766d9d5
+    frame_list = find_frames(img)
+    if len(frame_list) > 0:
+        max_frame = sorted(frame_list, key=cv2.contourArea, reverse=True)[0]
+        vec = max_frame[1] - max_frame[0]
+        rot_theta = np.arctan2(vec[0], vec[1]) *180/3.14
+        img = imutils.rotate(img, -rot_theta)
+    return img
+
+
+def threshold_image(image, threshold):
+    """
+    画像の2値化
+    :param image:
+    :param threshold: 自動設定の場合は0
+    :return:
+    """
+    img = cv2.GaussianBlur(image,(5,5),0)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if threshold == 0:
+        threshold_type = cv2.THRESH_OTSU
+    else:
+        threshold_type = cv2.THRESH_BINARY
+    _, img = cv2.threshold(img, threshold, 255, threshold_type)
+    return 255 - img
 
 
 def find_frames(img):
@@ -287,12 +272,12 @@ def find_frames(img):
     img = cv2.GaussianBlur(img, (5, 5), 5)
     edged = imutils.auto_canny(img)
 
-    cnts = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = imutils.grab_contours(cnts)
+    frame_contours = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    frame_contours = imutils.grab_contours(frame_contours)
     cnt_list = []
 
-    if len(cnts) > 0:
-        for c in cnts:
+    if len(frame_contours) > 0:
+        for c in frame_contours:
             # 小さい領域は無視
             if cv2.contourArea(c) < img.shape[0]*img.shape[1]*0.02:
                 continue
@@ -313,53 +298,97 @@ def find_frames(img):
     return cnt_list
 
 
-def split_image_vertical_and_choose_greatest(img):
-    vp = np.sum((img != 0).astype(np.uint8), axis=0)
-    loc_x_spike = np.where(vp == np.max(vp[:]))[0]
-    diff_loc_x_spike = np.diff(loc_x_spike)
-    idx = np.where(diff_loc_x_spike == max(diff_loc_x_spike))[0][0]
-    img = img[:, loc_x_spike[idx]:loc_x_spike[idx+1]]
-    return img
-
-
-def remove_lines(img):
-    # 縦横の線を削除
-    vp = np.sum((img != 0).astype(np.uint8), axis=0)
-    loc_x_spike = np.where(vp > np.max(vp[:])*0.9)[0]
-    for x in loc_x_spike:
-        line_color = (0, 0, 0)
-        cv2.line(img, (x, 0), (x, img.shape[0]), line_color, 3)
-
-    hp = np.sum((img != 0).astype(np.uint8), axis=1)
-    loc_y_spike = np.where(hp > np.max(hp[:])*0.9)[0]
-    for y in loc_y_spike:
-        line_color = (0, 0, 0)
-        cv2.line(img, (0, y), (img.shape[1], y), line_color, 3)
-
-    return img
-
-
-def threshold_image(img, threshold):
+@st.cache_data
+def find_marks(image, frame, threshold, acceptable_small_size = 0.4):
     """
-    画像の2値化
-    :param img:
-    :param threshold: 自動設定の場合は0
-    :return:
+    しきい値処理とノイズ除去を行った後、画像の指定されたフレーム内のマークを検出します。
+
+    Args:
+        image (numpy.ndarray): 入力画像。
+        frame (numpy.ndarray): 画像内のフレームの座標。
+        threshold (int): 2値化のためのしきい値。0の場合は大津の方法を使用。
+        acceptable_small_size (float): マークとして認識する最小のサイズ。
+
+    Returns:
+        tuple: 以下を含むタプル:
+            - list: 検出されたマークを表す輪郭のリスト。
+            - numpy.ndarray: 処理されたフレーム画像。
     """
+    warped_img = imutils.perspective.four_point_transform(image, frame)
+    bin_img = threshold_image(warped_img, threshold)
+    bin_img = my_img.remove_lines(bin_img)
 
-    # ぼかし処理
-    img = cv2.GaussianBlur(img,(5,5),0)
-    # グレースケール化
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # 2値化閾値自動設定の場合
-    if threshold == 0:
-        threshold_type = cv2.THRESH_OTSU
-    else:
-        threshold_type = cv2.THRESH_BINARY
+    # 収縮・膨張によりノイズを除去
+    kernel = np.ones((3, 3), np.uint8)
+    bin_img = cv2.erode(bin_img, kernel, iterations=2)
+    bin_img = cv2.dilate(bin_img, kernel, iterations=2)
 
-    _, img = cv2.threshold(img, threshold, 255, threshold_type)
-    img = 255 - img
-    return img
+    # マークの検出
+    mark_contours = cv2.findContours(bin_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    mark_contours = imutils.grab_contours(mark_contours)
+    if len(mark_contours) == 0:
+        return [], warped_img
+
+    # 線状の領域を削除
+    results = []
+    for c in mark_contours:
+        (x, y, w, h) = cv2.boundingRect(c)
+        ar = w / float(h)
+        if 0.5 < ar < 2:
+            results.append(c)
+    mark_contours = results
+
+    # acceptable_small_sizeより小さいマークを削除
+    max_area = np.max([cv2.contourArea(c) for c in mark_contours])
+    mark_contours = [c for c in mark_contours
+                     if cv2.contourArea(c) > max_area * acceptable_small_size]
+
+    # マークの並び替え（左上から右下へ）
+    mark_contours = sorted(mark_contours, key=lambda arg: (np.mean(arg[:]), np.mean(arg[:0])))
+    return mark_contours, warped_img
+
+
+def decode_marks(frame_dim, mark_list, mark_array_dim, is_double_mark):
+    """
+    指定された解答欄の寸法とマークリストに基づいてマークをデコードする。
+
+    Args:
+        frame_dim (tuple): 解答欄の寸法 (高さ, 幅)。
+        mark_list (list): 検出されたマークのリスト、それぞれのマークはその重心で表される。
+        mark_array_dim (tuple): マーク配列の寸法 (行, 列)。
+        is_double_mark (bool): ダブルマークを許可するかどうかのフラグ。
+
+    Returns:
+        list: 各行のデコードされたマーク文字列のリスト。ダブルマークが許可されていない場合、
+              複数のマークがある行は 'X' でマークされます。
+    """
+    MARK = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
+    mark_index = {char: index for index, char in enumerate(MARK)}
+
+    frame_height, frame_width = frame_dim
+    mark_rows, mark_cols = mark_array_dim
+
+    data_list = [""] * mark_rows
+
+    mark_centroid_list = [np.mean(mark, axis=0)[0] for mark in mark_list]
+    mark_centroid_list = sorted(mark_centroid_list, key=lambda arg: arg[1])
+    for mark in mark_centroid_list:
+        x, y = mark
+        # マークがどのセルに属するか
+        row = int((y/frame_height)*mark_rows)
+        col = int((x/frame_width)*mark_cols)
+        if is_double_mark:
+            # ダブルマークを許可
+            data_list[row] += MARK[col]
+        else:
+            if data_list[row] == "":
+                data_list[row] = MARK[col]
+            else:
+                data_list[row] = "X"
+
+    # マーク番号の並び替え("X"が含まれている場合はそのまま)
+    return ["X" if "X" in data else ''.join(sorted(data, key=lambda arg: mark_index[arg]))
+            for data in data_list]
 
 
 if __name__ == "__main__":
