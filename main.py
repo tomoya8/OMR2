@@ -32,7 +32,16 @@ def main():
     config = {}
 
     # UIの構築
-    st.html(const.STYLE)
+    st.set_page_config(page_title="OMR2 - マークシートリーダー", page_icon="📝",
+                       layout="wide", initial_sidebar_state="expanded",
+                       menu_items={"Get Help": "https://github.com/tomoya8/OMR2",
+                                   "About": """
+                                   ### OMR2 - マークシートリーダー
+                                   
+                                   https://github.com/tomoya8/OMR2
+                                   
+                                   Copyright (c) 2024 by T.Konishi. All rights reserved."""})
+    st.markdown(const.STYLE, unsafe_allow_html=True)
     st.title('OMR2 - マークシートリーダー')
 
     st.sidebar.write("## ● マークシート")
@@ -54,28 +63,44 @@ def main():
         pdf_document = fitz.open(stream=file_path.read(), filetype="pdf")
         pdf_max_page = pdf_document.page_count
         if pdf_max_page > 1:
-            page = st.sidebar.slider('ページ選択 [←] [→]', 1, pdf_max_page, 1)
+            page = st.sidebar.slider('ページ選択 [←] [→]', 1, pdf_max_page, 1,
+                                     help = """
+                                     プレビューのページを選択します。\n                                     
+                                     [←] [→] キーでもページ移動可能です。""")
         else:
             page = 1
 
-        img_width = st.sidebar.slider('表示サイズ', 0, 1000, 500, step=10)
+        # do_omr()の @st.cache_data を正常に動作させるために追加
+        config["page"] = page
 
-    st.sidebar.write("""
-    ## ● マーク検出設定
-    """)
-    if st.sidebar.checkbox('画像2値化閾値の自動設定', value=True):
+        img_width = st.sidebar.slider('表示サイズ', 0, 1000, 500, step=10,
+                                      help = "プレビュー画像の表示サイズを調整します。")
+
+    st.sidebar.write("## ● マーク検出設定")
+    if st.sidebar.checkbox('画像2値化閾値の自動設定', value=True, help = "チェックをはずすとスライダーで設定可能"):
         config["threshold"] = 0
     else:
-        config["threshold"] = st.sidebar.slider('', 0, 255, 170)
+        config["threshold"] = st.sidebar.slider('', 0, 255, 170,
+        help = "画像2値化の閾値を設定します。"
+               "値が大きいほど、より多くのマークを認識しますが、"
+               "ノイズも拾いやすくなります。")
 
-    if st.sidebar.checkbox('小さいマークを自動で除外', value=True):
-        config["acceptable_small_size"] = 0.4
+    if st.sidebar.checkbox('小さいマークを自動で除外', value=True, help = "チェックをはずすとスライダーで設定可能"):
+        config["mark_small_lim"] = 0.4
     else:
-        config["acceptable_small_size"] = st.sidebar.slider('', 0.0, 1.0, 0.4, step=0.05)
+        config["mark_small_lim"] = st.sidebar.slider('', 0.0, 1.0, const.DEFAULT_MARK_SMALL_LIM, step=0.05,
+        help = "小さいマークを除外するための閾値を設定します。"
+                "値が大きいほど、より多くの小さいマークが除外されるようになります。")
 
-    config["is_double_mark"] = st.sidebar.checkbox('ダブルマークを許可', value=True)
+    config["is_double_mark"] = st.sidebar.checkbox('ダブルマークを許可', value=True,
+    help = "ダブルマークの取り扱いを設定します。"
+           "許可しない場合、ダブルマークは'X'として記録されます。")
 
-    str_dimensions = st.sidebar.text_input('各フレームのマーク数(行x列)', value='(4x10), (30x10), (30x10)')
+    str_dimensions = st.sidebar.text_input('各フレームのマーク数(行x列)', value='(4x10), (30x10), (30x10)',
+    help = "各フレーム(解答枠)に含まれるマークの数(行x列)で指定します。"
+           "例: (4x10), (30x10), (30x10) など、"
+           "左上の解答枠から右下の解答枠に向かって、"
+           "解答枠の数だけカンマ区切りで入力してください。")
 
     # タプルのリストに変換
     matches = re.findall(r'\((\d+)[x,](\d+)\)', str_dimensions)
@@ -85,7 +110,7 @@ def main():
     download_button = st.sidebar.button("全てのシートを一括処理 🚀")
 
     if download_button:
-        data_list, image_list = do_all_omr(pdf_document, config)
+        data_list, image_list = do_pdf_omr(pdf_document, config)
 
         # CSVファイルの作成
         csv = pd.DataFrame(data_list).to_csv(index=False)
@@ -101,13 +126,16 @@ def main():
 
         st.balloons()
         st.success("全てのシートの読み取りが完了しました", icon="✅")
-        st.markdown(const.RESULTS.format(csv_b64=csv_b64, pdf_b64=pdf_b64), unsafe_allow_html=True)
+        st.markdown(const.RESULTS
+                    .format(csv_b64=csv_b64, csv_name=file_path.name.replace(".pdf", "_omr.csv"),
+                            pdf_b64=pdf_b64, pdf_name=file_path.name.replace(".pdf", "_omr.pdf")),
+                    unsafe_allow_html=True)
 
         st.button('戻る')
     else:
         # プレビュー
-
-        table, img = do_omr(pdf_document, page, config)
+        image = get_image_from_pdf(pdf_document, page)
+        table, img = do_omr(image, config)
 
         # 加工済み画像の表示
         st.write("### マーク検出結果プレビュー")
@@ -118,37 +146,46 @@ def main():
         df = pd.DataFrame(table,
                           index=(range(1, len(config["dim_list"])+1)),
                           columns=(range(1, max(config["dim_list"])[0]+1)))
-        st.table(df)
+        st.dataframe(df)
 
 
 @st.cache_data
-def do_all_omr(_pdf_document, config):
+def do_pdf_omr(_pdf_document, config):
     data_list = []
     image_list = []
+
+
+    st.html("<br/>")
+    my_bar = st.progress(0.0, "Operation in progress...")
     for page in range(1, _pdf_document.page_count+1):
-        table_list, image = do_omr(_pdf_document, page, config)
+        image = get_image_from_pdf(_pdf_document, page)
+        config["page"] = page
+        table_list, img = do_omr(image, config)
         # 1次元リストに変換
         table_list = [item for sublist in table_list for item in sublist]
         data_list.append(table_list)
-        image_list.append(image)
+        image_list.append(img)
+        message = "Operation in progress... (page {}/{})".format(page, _pdf_document.page_count)
+        my_bar.progress(float(page / _pdf_document.page_count), message)
 
+    my_bar.progress(1.0, "Operation in progress...")
+    my_bar.empty()
     return data_list, image_list
 
 
 @st.cache_data
-def do_omr(_pdf_document, page, config):
+def do_omr(_image, config):
     # 処理開始
     table_list = []
-    img = get_image_from_pdf(_pdf_document, page)
-    img = correct_tilt(img)
+    img = correct_tilt(_image)
     frame_list = find_frames(img)
 
     if len(frame_list) == 0:
-        st.error("解答枠が検出できませんでした。", icon="❌")
+        st.error("解答枠が検出できませんでした", icon="❌")
         st.stop()
 
     for i, frame in enumerate(frame_list):
-        mark_list, frame_img = find_marks(img, frame, config["threshold"], config["acceptable_small_size"])
+        mark_list, frame_img = find_marks(img, frame, config["threshold"], config["mark_small_lim"])
 
         try:
             _ = config["dim_list"][i]
@@ -178,6 +215,15 @@ def do_omr(_pdf_document, page, config):
         # cv2.circle(img, (np.min(c[0,0]), np.min(c[0,1])), 5, (255, 0, 0), -1)
         # cv2.circle(img, (np.min(c[1,0]), np.min(c[1,1])), 5, (0, 255, 0), -1)
         # cv2.circle(img, (np.min(c[2,0]), np.min(c[2,1])), 5, (0, 0, 255), -1)
+
+    # 設定情報の表示
+    threshold = "auto" if config["threshold"] == 0 else config["threshold"]
+    mark_small_lim = f"auto({const.DEFAULT_MARK_SMALL_LIM})"\
+        if config["mark_small_lim"] == const.DEFAULT_MARK_SMALL_LIM else config["mark_small_lim"]
+    is_double_mark = "yes" if config["is_double_mark"] else "no"
+    cv2.putText(img, "Threshold: {}, Small mark lim.: {}, Allow double marks: {}"
+                .format(threshold, mark_small_lim, is_double_mark),
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
 
     return table_list, img
 
@@ -239,7 +285,7 @@ def correct_tilt(img):
     if len(frame_list) > 0:
         max_frame = sorted(frame_list, key=cv2.contourArea, reverse=True)[0]
         vec = max_frame[1] - max_frame[0]
-        rot_theta = np.arctan2(vec[0], vec[1]) *180/3.14
+        rot_theta = np.arctan2(vec[0], vec[1]) * 180 / np.pi
         img = imutils.rotate(img, -rot_theta)
     return img
 
@@ -284,7 +330,7 @@ def find_frames(img):
     if len(frame_contours) > 0:
         for c in frame_contours:
             # 小さい領域は無視
-            if cv2.contourArea(c) < img.shape[0]*img.shape[1]*0.02:
+            if cv2.contourArea(c) < img.shape[0] * img.shape[1] * const.IGNORE_FRAMES_SMALLER_THAN:
                 continue
 
             peri = cv2.arcLength(c, True)
@@ -304,7 +350,7 @@ def find_frames(img):
 
 
 @st.cache_data
-def find_marks(image, frame, threshold, acceptable_small_size = 0.4):
+def find_marks(image, frame, threshold, mark_small_lim):
     """
     しきい値処理とノイズ除去を行った後、画像の指定されたフレーム内のマークを検出します。
 
@@ -312,7 +358,7 @@ def find_marks(image, frame, threshold, acceptable_small_size = 0.4):
         image (numpy.ndarray): 入力画像。
         frame (numpy.ndarray): 画像内のフレームの座標。
         threshold (int): 2値化のためのしきい値。0の場合は大津の方法を使用。
-        acceptable_small_size (float): マークとして認識する最小のサイズ。
+        mark_small_lim (float): マークとして認識する最小のサイズ。
 
     Returns:
         tuple: 以下を含むタプル:
@@ -339,14 +385,14 @@ def find_marks(image, frame, threshold, acceptable_small_size = 0.4):
     for c in mark_contours:
         (x, y, w, h) = cv2.boundingRect(c)
         ar = w / float(h)
-        if 0.5 < ar < 2:
+        if const.MARK_MIN_AR < ar < const.MARK_MAX_AR:
             results.append(c)
     mark_contours = results
 
-    # acceptable_small_sizeより小さいマークを削除
+    # mark_small_limより小さいマークを削除
     max_area = np.max([cv2.contourArea(c) for c in mark_contours])
     mark_contours = [c for c in mark_contours
-                     if cv2.contourArea(c) > max_area * acceptable_small_size]
+                     if cv2.contourArea(c) > max_area * mark_small_lim]
 
     # マークの並び替え（左上から右下へ）
     mark_contours = sorted(mark_contours, key=lambda arg: (np.mean(arg[:]), np.mean(arg[:0])))
@@ -368,7 +414,7 @@ def decode_marks(frame_dim, mark_list, mark_array_dim, is_double_mark):
               複数のマークがある行は 'X' でマークされます。
     """
 
-    mark_index = {char: index for index, char in enumerate(const.MARK)}
+    mark_index = {char: index for index, char in enumerate(const.MARK_LAYOUT)}
 
     frame_height, frame_width = frame_dim
     mark_rows, mark_cols = mark_array_dim
@@ -384,10 +430,10 @@ def decode_marks(frame_dim, mark_list, mark_array_dim, is_double_mark):
         col = int((x/frame_width)*mark_cols)
         if is_double_mark:
             # ダブルマークを許可
-            data_list[row] += const.MARK[col]
+            data_list[row] += const.MARK_LAYOUT[col]
         else:
             if data_list[row] == "":
-                data_list[row] = const.MARK[col]
+                data_list[row] = const.MARK_LAYOUT[col]
             else:
                 data_list[row] = "X"
 
