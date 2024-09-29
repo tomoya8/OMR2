@@ -30,8 +30,17 @@ def is_color_image(image):
 
 
 def remove_lines(image):
+    """
+    画像から線状の領域を削除します。
+
+    Args:
+        image (numpy.ndarray): 入力画像。
+
+    Returns:
+        numpy.ndarray: 線状の領域が削除された画像。
+    """
     img = image.copy()
-    # 縦横の線を削除
+
     vp = np.sum((img != 0).astype(np.uint8), axis=0)
     loc_x_spike = np.where(vp > np.max(vp[:])*0.9)[0]
     for x in loc_x_spike:
@@ -55,6 +64,15 @@ def count_pixels_in_rect(image, rect):
 
 
 def extract_monotone(image):
+    """
+    画像からモノクロ領域を抽出し、他の領域を白色に置き換えます（着色領域の除去）。
+
+    Args:
+        image (numpy.ndarray): 入力画像。
+
+    Returns:
+        numpy.ndarray: 単色領域が抽出され、他の領域が白色に置き換えられた画像。
+    """
     hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     white_image = np.ones_like(image) * 255
 
@@ -74,6 +92,15 @@ def extract_monotone(image):
 
 
 def split_image_vertical_and_choose_greatest(image):
+    """
+    画像を縦線で垂直方向に分割し、最も大きな領域を選択します。
+
+    Args:
+        image (numpy.ndarray): 入力画像。
+
+    Returns:
+        numpy.ndarray: 最も大きな領域を含む画像の部分。
+    """
     vp = np.sum((image != 0).astype(np.uint8), axis=0)
     loc_x_spike = np.where(vp == np.max(vp[:]))[0]
     diff_loc_x_spike = np.diff(loc_x_spike)

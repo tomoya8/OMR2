@@ -84,7 +84,7 @@ def main():
         config["threshold"] = st.sidebar.slider('2値化閾値', 0, 255, 170,
         help = "画像2値化の閾値を設定します。"
                "値が大きいほど、より多くのマークを認識しますが、"
-               "ノイズも拾いやすくなります。")
+               "その分ノイズも拾いやすくなります。")
 
     if st.sidebar.checkbox('小さいマークを自動で除外', value=True, help = "チェックをはずすとスライダーで設定可能"):
         config["mark_small_lim"] = 0.4
@@ -120,16 +120,21 @@ def main():
         # PDFファイルの作成
         pdf_doc = fitz.open()
         for image in image_list:
-            _, jpg_buf = cv2.imencode(".jpg", image, (cv2.IMWRITE_JPEG_QUALITY, 50))
+            _, jpg_buf = cv2.imencode(".jpg", image, (cv2.IMWRITE_JPEG_QUALITY, const.PDF_JPEG_QUALITY))
             page = pdf_doc.new_page()
             page.insert_image(page.rect, stream=jpg_buf.tobytes())
         pdf_b64 = base64.b64encode(pdf_doc.tobytes()).decode()
 
-        st.balloons()
         st.success("全てのシートの読み取りが完了しました", icon="✅")
+        st.balloons()
+
+        # ダウンロードリンクの表示
+        threshold = "auto" if config["threshold"] == 0 else config["threshold"]
         st.markdown(const.RESULTS
-                    .format(csv_b64=csv_b64, csv_name=file_path.name.replace(".pdf", "_omr.csv"),
-                            pdf_b64=pdf_b64, pdf_name=file_path.name.replace(".pdf", "_omr.pdf")),
+                    .format(csv_b64=csv_b64,
+                            csv_name=file_path.name.replace(".pdf", f"_OMR{threshold}_{config['mark_small_lim']}.csv"),
+                            pdf_b64=pdf_b64,
+                            pdf_name=file_path.name.replace(".pdf", f"_OMR{threshold}_{config['mark_small_lim']}.pdf")),
                     unsafe_allow_html=True)
 
         st.button('戻る')
@@ -218,7 +223,7 @@ def do_omr(_image, config):
                        .format(len(frame_list), len(config["dim_list"])), icon="❌")
             st.stop()
 
-        frame_width = np.max(frame[:,0]) - np.min(frame[:,0])
+        frame_width  = np.max(frame[:,0]) - np.min(frame[:,0])
         frame_height = np.max(frame[:,1]) - np.min(frame[:,1])
         data = decode_marks((frame_height, frame_width), mark_list, config["dim_list"][i], config["is_double_mark"])
         table_list.append(data)
@@ -423,12 +428,12 @@ def find_marks(image, frame, threshold, mark_small_lim):
     return mark_contours, warped_img
 
 
-def decode_marks(frame_dim, mark_list, mark_array_dim, is_double_mark):
+def decode_marks(frame_size, mark_list, mark_array_dim, is_double_mark):
     """
     指定された解答欄の寸法とマークリストに基づいてマークをデコードする。
 
     Args:
-        frame_dim (tuple): 解答欄の寸法 (高さ, 幅)。
+        frame_size (tuple): 解答欄の寸法 (高さ, 幅)。
         mark_list (list): 検出されたマークのリスト、それぞれのマークはその重心で表される。
         mark_array_dim (tuple): マーク配列の寸法 (行, 列)。
         is_double_mark (bool): ダブルマークを許可するかどうかのフラグ。
@@ -440,7 +445,7 @@ def decode_marks(frame_dim, mark_list, mark_array_dim, is_double_mark):
 
     mark_index = {char: index for index, char in enumerate(const.MARK_LAYOUT)}
 
-    frame_height, frame_width = frame_dim
+    frame_height, frame_width = frame_size
     mark_rows, mark_cols = mark_array_dim
 
     data_list = [""] * mark_rows
