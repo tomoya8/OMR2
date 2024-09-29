@@ -23,20 +23,19 @@ from imutils.perspective import four_point_transform
 import re
 import base64
 
+# local modules
 import const
 import my_img
 
-# 参考
-# https://qiita.com/not13/items/dcd8c12d64982dc0e819
 
 def main():
+    config = {}
+
     # UIの構築
-    st.markdown(const.STYLE, unsafe_allow_html=True)
+    st.html(const.STYLE)
     st.title('OMR2 - マークシートリーダー')
 
-    st.sidebar.write("""
-    ## ● マークシート
-    """)
+    st.sidebar.write("## ● マークシート")
     file_path = st.sidebar.file_uploader("PDFファイル", type="pdf")
 
     if not file_path:
@@ -53,8 +52,9 @@ def main():
         st.session_state.file_path = file_path
 
         pdf_document = fitz.open(stream=file_path.read(), filetype="pdf")
-        if pdf_document.page_count > 1:
-            page = st.sidebar.slider('ページ選択 [←] [→]', 1, pdf_document.page_count, 1)
+        pdf_max_page = pdf_document.page_count
+        if pdf_max_page > 1:
+            page = st.sidebar.slider('ページ選択 [←] [→]', 1, pdf_max_page, 1)
         else:
             page = 1
 
@@ -64,26 +64,28 @@ def main():
     ## ● マーク検出設定
     """)
     if st.sidebar.checkbox('画像2値化閾値の自動設定', value=True):
-        threshold = 0
+        config["threshold"] = 0
     else:
-        threshold = st.sidebar.slider('', 0, 255, 170)
+        config["threshold"] = st.sidebar.slider('', 0, 255, 170)
 
     if st.sidebar.checkbox('小さいマークを自動で除外', value=True):
-        acceptable_small_size = 0.4
+        config["acceptable_small_size"] = 0.4
     else:
-        acceptable_small_size = st.sidebar.slider('', 0.0, 1.0, 0.4, step=0.05)
+        config["acceptable_small_size"] = st.sidebar.slider('', 0.0, 1.0, 0.4, step=0.05)
 
-    is_double_mark = st.sidebar.checkbox('ダブルマークを許可', value=True)
+    config["is_double_mark"] = st.sidebar.checkbox('ダブルマークを許可', value=True)
+
     str_dimensions = st.sidebar.text_input('各フレームのマーク数(行x列)', value='(4x10), (30x10), (30x10)')
+
     # タプルのリストに変換
     matches = re.findall(r'\((\d+)[x,](\d+)\)', str_dimensions)
-    dim_list = [(int(x), int(y)) for x, y in matches]
+    config["dim_list"] = [(int(x), int(y)) for x, y in matches]
 
     # 処理開始
     download_button = st.sidebar.button("全てのシートを一括処理 🚀")
 
     if download_button:
-        data_list, image_list = do_all_omr(pdf_document, threshold, acceptable_small_size, is_double_mark, dim_list)
+        data_list, image_list = do_all_omr(pdf_document, config)
 
         # CSVファイルの作成
         csv = pd.DataFrame(data_list).to_csv(index=False)
@@ -104,7 +106,8 @@ def main():
         st.button('戻る')
     else:
         # プレビュー
-        table, img = do_omr(pdf_document, page, threshold, acceptable_small_size, is_double_mark, dim_list)
+
+        table, img = do_omr(pdf_document, page, config)
 
         # 加工済み画像の表示
         st.write("### マーク検出結果プレビュー")
@@ -113,17 +116,17 @@ def main():
         # 結果の表示
         st.write("### マーク読み取り結果")
         df = pd.DataFrame(table,
-                          index=(range(1, len(dim_list)+1)),
-                          columns=(range(1, max(dim_list)[0]+1)))
+                          index=(range(1, len(config["dim_list"])+1)),
+                          columns=(range(1, max(config["dim_list"])[0]+1)))
         st.table(df)
 
 
 @st.cache_data
-def do_all_omr(_pdf_document, threshold, acceptable_small_size, is_double_mark, dim_list):
+def do_all_omr(_pdf_document, config):
     data_list = []
     image_list = []
     for page in range(1, _pdf_document.page_count+1):
-        table_list, image = do_omr(_pdf_document, page, threshold, acceptable_small_size, is_double_mark, dim_list)
+        table_list, image = do_omr(_pdf_document, page, config)
         # 1次元リストに変換
         table_list = [item for sublist in table_list for item in sublist]
         data_list.append(table_list)
@@ -133,7 +136,7 @@ def do_all_omr(_pdf_document, threshold, acceptable_small_size, is_double_mark, 
 
 
 @st.cache_data
-def do_omr(_pdf_document, page, threshold, acceptable_small_size, is_double_mark, dim_list):
+def do_omr(_pdf_document, page, config):
     # 処理開始
     table_list = []
     img = get_image_from_pdf(_pdf_document, page)
@@ -141,22 +144,22 @@ def do_omr(_pdf_document, page, threshold, acceptable_small_size, is_double_mark
     frame_list = find_frames(img)
 
     if len(frame_list) == 0:
-        st.error("エラー！ 解答枠が検出できませんでした。", icon="❌")
+        st.error("解答枠が検出できませんでした。", icon="❌")
         st.stop()
 
     for i, frame in enumerate(frame_list):
-        mark_list, frame_img = find_marks(img, frame, threshold, acceptable_small_size)
+        mark_list, frame_img = find_marks(img, frame, config["threshold"], config["acceptable_small_size"])
 
         try:
-            _ = dim_list[i]
+            _ = config["dim_list"][i]
         except IndexError:
-            st.error("解答枠の個数({})に対してマーク数設定(nxm)の数({})が不足しています"
-                       .format(len(frame_list), len(dim_list)), icon="❌")
+            st.error("検出した解答枠の数（{}）に対してマーク数設定 (nxm) の数（{}）が不足しています"
+                       .format(len(frame_list), len(config["dim_list"])), icon="❌")
             st.stop()
 
         frame_width = np.max(frame[:,0]) - np.min(frame[:,0])
         frame_height = np.max(frame[:,1]) - np.min(frame[:,1])
-        data = decode_marks((frame_height, frame_width), mark_list, dim_list[i], is_double_mark)
+        data = decode_marks((frame_height, frame_width), mark_list, config["dim_list"][i], config["is_double_mark"])
         table_list.append(data)
 
         # 検出したマークの描画
@@ -223,7 +226,7 @@ def get_image_from_pdf(pdf_document, page):
     # elif my_img.is_color_image(img):
     #    st.write("カラー画像です。")
 
-    width = 2000
+    width = const.OMR_IMAGE_PROCESSING_WIDTH
     img = cv2.resize(img, (int(img.shape[1]*width/img.shape[0]), width))
 
     return img
