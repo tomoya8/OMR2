@@ -23,6 +23,7 @@ from imutils.perspective import four_point_transform
 import re
 import base64
 
+import const
 import my_img
 
 # 参考
@@ -30,6 +31,7 @@ import my_img
 
 def main():
     # UIの構築
+    st.markdown(const.STYLE, unsafe_allow_html=True)
     st.title('OMR2 - マークシートリーダー')
 
     st.sidebar.write("""
@@ -38,7 +40,8 @@ def main():
     file_path = st.sidebar.file_uploader("PDFファイル", type="pdf")
 
     if not file_path:
-        st.sidebar.write("マークシートを読み込んでください")
+        # st.sidebar.write("マークシートを読み込んでください")
+        st.info("マークシートを読み込んでください", icon="ℹ️")
         return
     else:
         try:
@@ -77,7 +80,7 @@ def main():
     dim_list = [(int(x), int(y)) for x, y in matches]
 
     # 処理開始
-    download_button = st.sidebar.button("全てのシートを処理")
+    download_button = st.sidebar.button("全てのシートを一括処理 🚀")
 
     if download_button:
         data_list, image_list = do_all_omr(pdf_document, threshold, acceptable_small_size, is_double_mark, dim_list)
@@ -89,29 +92,26 @@ def main():
         # PDFファイルの作成
         pdf_doc = fitz.open()
         for image in image_list:
-            img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            _, jpg_buf = cv2.imencode(".jpg", img, (cv2.IMWRITE_JPEG_QUALITY, 50))
+            _, jpg_buf = cv2.imencode(".jpg", image, (cv2.IMWRITE_JPEG_QUALITY, 50))
             page = pdf_doc.new_page()
             page.insert_image(page.rect, stream=jpg_buf.tobytes())
         pdf_b64 = base64.b64encode(pdf_doc.tobytes()).decode()
 
-        st.success("全てのシートの読み取りが完了しました")
         st.balloons()
-        st.markdown(f'<a href="data:file/csv;base64,{csv_b64}" download="result.csv">Download csv file</a>',
-                    unsafe_allow_html=True)
-        st.markdown(f'<a href="data:file/pdf;base64,{pdf_b64}" download="result.pdf">Download pdf file</a>',
-                    unsafe_allow_html=True)
+        st.success("全てのシートの読み取りが完了しました", icon="✅")
+        st.markdown(const.RESULTS.format(csv_b64=csv_b64, pdf_b64=pdf_b64), unsafe_allow_html=True)
+
         st.button('戻る')
     else:
         # プレビュー
         table, img = do_omr(pdf_document, page, threshold, acceptable_small_size, is_double_mark, dim_list)
 
         # 加工済み画像の表示
-        st.write("検出結果プレビュー")
-        st.image(img, width=img_width)
+        st.write("### マーク検出結果プレビュー")
+        st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), width=img_width)
 
         # 結果の表示
-        st.write("マーク読み取り結果")
+        st.write("### マーク読み取り結果")
         df = pd.DataFrame(table,
                           index=(range(1, len(dim_list)+1)),
                           columns=(range(1, max(dim_list)[0]+1)))
@@ -141,7 +141,7 @@ def do_omr(_pdf_document, page, threshold, acceptable_small_size, is_double_mark
     frame_list = find_frames(img)
 
     if len(frame_list) == 0:
-        st.warning("エラー！ 解答枠が検出できませんでした。")
+        st.error("エラー！ 解答枠が検出できませんでした。", icon="❌")
         st.stop()
 
     for i, frame in enumerate(frame_list):
@@ -150,8 +150,8 @@ def do_omr(_pdf_document, page, threshold, acceptable_small_size, is_double_mark
         try:
             _ = dim_list[i]
         except IndexError:
-            st.warning("解答枠の個数({})に対してマーク数設定(nxm)の数({})が不足しています"
-                       .format(len(frame_list), len(dim_list)))
+            st.error("解答枠の個数({})に対してマーク数設定(nxm)の数({})が不足しています"
+                       .format(len(frame_list), len(dim_list)), icon="❌")
             st.stop()
 
         frame_width = np.max(frame[:,0]) - np.min(frame[:,0])
@@ -165,7 +165,7 @@ def do_omr(_pdf_document, page, threshold, acceptable_small_size, is_double_mark
             for pt in mark:
                 pt[0] += frame_origin
 
-            cv2.drawContours(img, [mark], -1, (255, 0, 0), 2)
+            cv2.drawContours(img, [mark], -1, (0, 0, 255), 2)
 
     # 解答枠の描画
     for i,c in enumerate(frame_list):
@@ -214,10 +214,11 @@ def get_image_from_pdf(pdf_document, page):
     img = img[int(margin_h):int(-margin_h), int(margin_w):int(-margin_w)]
 
     if my_img.is_binary_image(img):
-        st.warning("注意！ 2値化された画像です。なるべくカラーで読み込んでください。")
+        st.warning("2値化された画像です。なるべくカラーで読み込んでください。", icon="⚠️")
 
     elif my_img.is_gray_image(img):
-        st.warning("注意! グレースケール画像です。なるべくカラーで読み込んでください。")
+        st.warning("グレースケール画像です。なるべくカラーで読み込んでください。", icon="⚠️")
+        # st.warning("グレースケール画像です。なるべくカラーで読み込んでください。", icon=":material/warning:")
 
     # elif my_img.is_color_image(img):
     #    st.write("カラー画像です。")
@@ -238,6 +239,7 @@ def correct_tilt(img):
         rot_theta = np.arctan2(vec[0], vec[1]) *180/3.14
         img = imutils.rotate(img, -rot_theta)
     return img
+
 
 
 def threshold_image(image, threshold):
@@ -362,8 +364,8 @@ def decode_marks(frame_dim, mark_list, mark_array_dim, is_double_mark):
         list: 各行のデコードされたマーク文字列のリスト。ダブルマークが許可されていない場合、
               複数のマークがある行は 'X' でマークされます。
     """
-    MARK = ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
-    mark_index = {char: index for index, char in enumerate(MARK)}
+
+    mark_index = {char: index for index, char in enumerate(const.MARK)}
 
     frame_height, frame_width = frame_dim
     mark_rows, mark_cols = mark_array_dim
@@ -379,10 +381,10 @@ def decode_marks(frame_dim, mark_list, mark_array_dim, is_double_mark):
         col = int((x/frame_width)*mark_cols)
         if is_double_mark:
             # ダブルマークを許可
-            data_list[row] += MARK[col]
+            data_list[row] += const.MARK[col]
         else:
             if data_list[row] == "":
-                data_list[row] = MARK[col]
+                data_list[row] = const.MARK[col]
             else:
                 data_list[row] = "X"
 
